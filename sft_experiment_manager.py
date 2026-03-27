@@ -855,6 +855,29 @@ def delete_experiment(experiment_id):
         return {"success": False, "error": str(e)}
 
 
+def update_experiment_samples(experiment_id):
+    """Recalculate and persist training_samples for an experiment using the live domain-aware count.
+
+    Uses get_prompts_by_department (domain column first, keyword fallback) so the count
+    always reflects the full prompt set for the experiment's department.
+    """
+    try:
+        exp_result = get_experiment(experiment_id)
+        if not exp_result.get("success"):
+            return exp_result
+        department = exp_result["experiment"].get("department")
+        if not department:
+            return {"success": False, "error": "Experiment has no department set"}
+        count_result = get_prompts_by_department(department, limit=10000)
+        if not count_result.get("success"):
+            return count_result
+        new_count = count_result["total"]
+        _update_experiment_status(experiment_id, training_samples=new_count)
+        return {"success": True, "training_samples": new_count, "department": department}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 # ============================================================================
 # Training Orchestration (Background Thread)
 # ============================================================================
@@ -877,12 +900,16 @@ def _build_training_data_from_db(department=None, use_sme_scores=False, min_sme_
                 # Build base query conditions
                 conditions = []
                 params = []
-                
+
                 if department and department in DEPARTMENTS:
                     keywords = DEPARTMENTS[department]
                     kw_conditions = " OR ".join(["LOWER(prompt) LIKE %s" for _ in keywords])
-                    conditions.append(f"({kw_conditions})")
-                    params.extend([f"%{kw.lower()}%" for kw in keywords])
+                    # Match rows tagged with this domain OR untagged rows that hit a keyword
+                    conditions.append(
+                        f"(LOWER(domain) = LOWER(%s) OR "
+                        f"((domain IS NULL OR TRIM(domain) = '') AND ({kw_conditions})))"
+                    )
+                    params.extend([department] + [f"%{kw.lower()}%" for kw in keywords])
                 
                 # SME score-based filtering
                 if use_sme_scores:
@@ -1449,7 +1476,7 @@ def get_department_list():
 
 
 def get_prompts_by_department(department, limit=10, reason_empty_only=False):
-    """Get prompts matching a department based on keyword matching.
+    """Get prompts matching a department using domain column first, then keyword fallback.
 
     Args:
         department: Department name from DEPARTMENTS dict
@@ -1463,29 +1490,40 @@ def get_prompts_by_department(department, limit=10, reason_empty_only=False):
     try:
         with _connect() as conn:
             with conn.cursor() as cur:
-                # Build keyword conditions on the prompt text
-                kw_conditions = " OR ".join(["LOWER(prompt) LIKE %s" for _ in keywords])
-                kw_params = [f"%{kw.lower()}%" for kw in keywords]
+                reason_filter = """
+                    AND group_id IN (
+                        SELECT group_id FROM sft_ranked_data
+                        WHERE reason IS NULL OR TRIM(reason) = ''
+                    )
+                """ if reason_empty_only else ""
 
-                if reason_empty_only:
-                    sql = f"""
-                        SELECT DISTINCT group_id FROM sft_ranked_data
-                        WHERE ({kw_conditions})
-                        AND group_id IN (
-                            SELECT group_id FROM sft_ranked_data
-                            WHERE reason IS NULL OR TRIM(reason) = ''
-                        )
-                        LIMIT %s
-                    """
-                else:
-                    sql = f"""
-                        SELECT DISTINCT group_id FROM sft_ranked_data
-                        WHERE ({kw_conditions})
-                        LIMIT %s
-                    """
-
-                cur.execute(sql, kw_params + [limit])
+                # Primary: match rows explicitly tagged with this domain
+                domain_sql = f"""
+                    SELECT DISTINCT group_id FROM sft_ranked_data
+                    WHERE LOWER(domain) = LOWER(%s)
+                    {reason_filter}
+                    LIMIT %s
+                """
+                cur.execute(domain_sql, [department, limit])
                 group_ids = [row[0] for row in cur.fetchall()]
+
+                # Fallback: keyword match for rows without a domain tag
+                if len(group_ids) < limit:
+                    kw_conditions = " OR ".join(["LOWER(prompt) LIKE %s" for _ in keywords])
+                    kw_params = [f"%{kw.lower()}%" for kw in keywords]
+                    exclude = ", ".join(["%s"] * len(group_ids)) if group_ids else "NULL"
+                    exclude_clause = f"AND group_id NOT IN ({exclude})" if group_ids else ""
+                    remaining = limit - len(group_ids)
+                    kw_sql = f"""
+                        SELECT DISTINCT group_id FROM sft_ranked_data
+                        WHERE (domain IS NULL OR TRIM(domain) = '')
+                        AND ({kw_conditions})
+                        {exclude_clause}
+                        {reason_filter}
+                        LIMIT %s
+                    """
+                    cur.execute(kw_sql, kw_params + group_ids + [remaining])
+                    group_ids += [row[0] for row in cur.fetchall()]
 
                 if not group_ids:
                     return {

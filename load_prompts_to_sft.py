@@ -44,6 +44,8 @@ DB_CONFIG = {k: v for k, v in _raw.items() if v is not None}
 FILES = [
     ("neurologist_prompts_100.json", "Neurology"),
     ("cardiologist_prompts_100.json", "Cardiology"),
+    ("pediatrician_prompts_100.json", "Pediatrics"),
+    ("orthopedic_prompts_100.json", "Orthopedics"),
 ]
 
 

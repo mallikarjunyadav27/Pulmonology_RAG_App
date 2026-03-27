@@ -689,6 +689,48 @@
         }
         .exp-quick-q:hover { background: #667eea; color: white; }
 
+        .dept-quick-group {
+            border: 1.5px solid #e0e0e0;
+            border-radius: 10px;
+            padding: 10px 14px;
+            margin-bottom: 8px;
+            transition: all 0.25s;
+            background: #fafafa;
+        }
+        .dept-quick-group.active {
+            border-color: #667eea;
+            background: #f0f2ff;
+            box-shadow: 0 2px 8px rgba(102,126,234,0.12);
+        }
+        .dept-quick-group.dimmed { opacity: 0.45; }
+        .dept-quick-group .dept-label {
+            font-size: 0.8em;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #667eea;
+            margin-bottom: 7px;
+        }
+        .dept-quick-group.dimmed .dept-label { color: #aaa; }
+        .dept-quick-group .dept-q-btn {
+            display: inline-block;
+            padding: 5px 12px;
+            border: 1px solid #667eea;
+            background: white;
+            color: #667eea;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 0.82em;
+            margin: 3px 4px 3px 0;
+            transition: all 0.2s;
+            max-width: 100%;
+            text-align: left;
+            white-space: normal;
+            line-height: 1.35;
+        }
+        .dept-quick-group .dept-q-btn:hover { background: #667eea; color: white; }
+        .dept-quick-group.dimmed .dept-q-btn { border-color: #ccc; color: #999; }
+
         .exp-modal {
             position: fixed;
             top: 0; left: 0; right: 0; bottom: 0;
@@ -1278,19 +1320,14 @@
 
                 <div class="form-group">
                     <label>Max Tokens</label>
-                    <input type="number" id="test-exp-max-tokens" value="256" min="32" max="1024"
+                    <input type="number" id="test-exp-max-tokens" value="500" min="32" max="1024"
                            style="width: 150px; padding: 8px; border: 1px solid #ddd; border-radius: 8px;">
                 </div>
 
-                <div style="margin-bottom: 10px;">
-                    <strong>Quick Questions:</strong>
-                    <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px;">
-                        <button class="exp-quick-q" onclick="setTestQuestion('Explain the symptoms of Type-2 Diabetes')">Diabetes Symptoms</button>
-                        <button class="exp-quick-q" onclick="setTestQuestion('What are the warning signs of a heart attack?')">Heart Attack Signs</button>
-                        <button class="exp-quick-q" onclick="setTestQuestion('How do antibiotics work?')">Antibiotics</button>
-                        <button class="exp-quick-q" onclick="setTestQuestion('What causes high blood pressure?')">High BP Causes</button>
-                        <button class="exp-quick-q" onclick="setTestQuestion('What is the role of insulin in the body?')">Insulin Role</button>
-                    </div>
+                <div style="margin-bottom: 14px;">
+                    <strong>💡 Quick Questions from Training Data</strong>
+                    <span style="font-size:0.82em; color:#888; margin-left:6px;">Select a model above to highlight its questions</span>
+                    <div id="dept-quick-questions" style="margin-top: 10px;"></div>
                 </div>
 
                 <button class="btn btn-primary" onclick="testExperimentModel()" id="test-exp-btn" disabled style="opacity: 0.6;">🔬 Generate Response</button>
@@ -2962,6 +2999,14 @@
                         
                         document.getElementById('progress-epoch').textContent = `${latest.num_epochs}/${latest.num_epochs}`;
                         document.getElementById('progress-loss').textContent = latest.metrics?.train_loss ? latest.metrics.train_loss.toFixed(4) : '—';
+
+                        // Show final training duration
+                        if (latest.started_at && latest.completed_at) {
+                            const secs = Math.round((new Date(latest.completed_at) - new Date(latest.started_at)) / 1000);
+                            const m = Math.floor(secs / 60), s = secs % 60;
+                            const dur = secs < 60 ? `${secs}s` : secs < 3600 ? `${m}m ${s}s` : `${Math.floor(secs/3600)}h ${m%60}m`;
+                            document.getElementById('progress-elapsed').textContent = dur;
+                        }
                         return;
                     }
                 }
@@ -2984,10 +3029,25 @@
                 if (expData.success && expData.experiments.length > 0) {
                     const completed = expData.experiments.filter(e => e.status === 'completed');
                     if (completed.length > 0) {
+                        // Recalculate sample counts for all completed experiments in parallel
+                        await Promise.all(completed.map(async exp => {
+                            if (exp.department) {
+                                try {
+                                    const r = await fetch(`/api/rlhf/experiment/${exp.id}/recalc-samples`, {method: 'POST'});
+                                    const d = await r.json();
+                                    if (d.success) exp.training_samples = d.training_samples;
+                                } catch (_) {}
+                            }
+                        }));
+
                         completed.forEach(exp => {
                             const deptLabel = exp.department ? `🏥 ${exp.department}` : exp.experiment_name;
                             const samplesInfo = exp.training_samples ? ` · ${exp.training_samples} samples` : '';
-                            select.innerHTML += `<option value="exp_${exp.id}">${deptLabel} — ${exp.experiment_name}${samplesInfo}</option>`;
+                            const opt = document.createElement('option');
+                            opt.value = `exp_${exp.id}`;
+                            opt.textContent = `${deptLabel} — ${exp.experiment_name}${samplesInfo}`;
+                            opt.dataset.dept = exp.department || '';
+                            select.appendChild(opt);
                         });
                         infoDiv.innerHTML = `✅ <strong>${completed.length}</strong> trained model(s) available`;
                     } else {
@@ -3000,12 +3060,117 @@
                 select.onchange = function() {
                     btn.disabled = !this.value;
                     btn.style.opacity = this.value ? '1' : '0.6';
+                    // Show only the selected department's questions
+                    const selOpt = this.value ? this.options[this.selectedIndex] : null;
+                    const dept = selOpt ? (selOpt.dataset.dept || null) : null;
+                    renderDeptQuickQuestions(dept);
                 };
+                // Render all groups on load (no active dept yet)
+                renderDeptQuickQuestions(null);
             } catch (e) { console.error(e); }
         }
 
         function setTestQuestion(q) {
             document.getElementById('test-exp-question').value = q;
+            document.getElementById('test-exp-question').focus();
+        }
+
+        const DEPT_QUICK_QUESTIONS = {
+            'Cardiology': [
+                {
+                    label: 'Coronary Artery Disease',
+                    q: 'I am evaluating a 45-year-old Middle Eastern female from the West Coast who drinks occasionally and has a history of drug abuse. The patient presents with chest pain on exertion. Symptoms have progressed or fluctuated over recent weeks or months. Could this indicate coronary artery disease and what diagnostic and management approach should I take?'
+                },
+                {
+                    label: 'Cardiomyopathy',
+                    q: 'I am evaluating a 76-year-old Asian male from the Great Lakes who does not drink and has a history of drug abuse. The patient presents with exercise intolerance. Symptoms have progressed or fluctuated over recent weeks or months. Could this indicate cardiomyopathy and what diagnostic and management approach should I take?'
+                },
+                {
+                    label: 'Valvular Heart Disease',
+                    q: 'I am evaluating a 25-year-old South Asian male from the Mountain Ranges who does not drink and denies drug abuse. The patient presents with fatigue and dizziness. Symptoms have progressed or fluctuated over recent weeks or months. Could this indicate valvular heart disease and what diagnostic and management approach should I take?'
+                },
+                {
+                    label: 'Arrhythmia / Palpitations',
+                    q: 'I am evaluating a 36-year-old South Asian female from the Northeast who drinks regularly and denies drug abuse. The patient presents with palpitations. Symptoms have progressed or fluctuated over recent weeks or months. Could this indicate arrhythmia and what diagnostic and management approach should I take?'
+                }
+            ],
+            'Neurology': [
+                {
+                    label: 'ALS / Progressive Weakness',
+                    q: 'I am evaluating a 24-year-old Asian female from the West Coast who drinks regularly and denies drug abuse. The patient presents with progressive limb weakness. Symptoms have progressed or changed over recent weeks or months. Could this indicate ALS and what diagnostic approach should I take?'
+                },
+                {
+                    label: 'Parkinsonism',
+                    q: 'I am evaluating a 36-year-old South Asian female from Texas who drinks regularly and denies drug abuse. The patient presents with bradykinesia and rigidity. Symptoms have progressed or changed over recent weeks or months. Could this indicate Parkinsonism and what diagnostic approach should I take?'
+                },
+                {
+                    label: 'New-onset Epilepsy',
+                    q: 'I am evaluating a 85-year-old Caucasian female from the Mountain Ranges who drinks occasionally and has a history of drug abuse. The patient presents with new-onset seizures. Symptoms have progressed or changed over recent weeks or months. Could this indicate epilepsy and what diagnostic approach should I take?'
+                },
+                {
+                    label: 'Syncope vs Seizures',
+                    q: 'I am evaluating a 22-year-old South Asian male from the Mid Atlantic who drinks regularly and has a history of drug abuse. The patient presents with loss of consciousness episodes. Symptoms have progressed or changed over recent weeks or months. Could this indicate syncope vs seizures and what diagnostic approach should I take?'
+                }
+            ],
+            'Orthopedics': [
+                {
+                    label: 'Carpal Tunnel Syndrome',
+                    q: 'I am evaluating a 32-year-old Asian Male from Florida who does not drink and has a history of drug abuse. The patient presents with wrist pain after repetitive work. Symptoms have persisted for several weeks and are affecting mobility and daily activities. Could this indicate carpal tunnel syndrome and what diagnostic and treatment options should I consider?'
+                },
+                {
+                    label: 'Rheumatoid Arthritis',
+                    q: 'I am evaluating a 36-year-old Middle Eastern Male from the Midwest who drinks regularly and has a history of drug abuse. The patient presents with joint pain and morning stiffness. Symptoms have persisted for several weeks and are affecting mobility and daily activities. Could this indicate rheumatoid arthritis and what diagnostic and treatment options should I consider?'
+                },
+                {
+                    label: 'Ligament Injury',
+                    q: 'I am evaluating a 63-year-old Latino Female from Texas who does not drink and has a history of drug abuse. The patient presents with ankle instability. Symptoms have persisted for several weeks and are affecting mobility and daily activities. Could this indicate ligament injury and what diagnostic and treatment options should I consider?'
+                },
+                {
+                    label: 'Hip Joint Degeneration',
+                    q: 'I am evaluating a 29-year-old African American Male from the Great Lakes who drinks regularly and denies drug abuse. The patient presents with hip pain during walking. Symptoms have persisted for several weeks and are affecting mobility and daily activities. Could this indicate hip joint degeneration and what diagnostic and treatment options should I consider?'
+                }
+            ],
+            'Pediatrics': [
+                {
+                    label: 'Migraine / Tension Headache',
+                    q: 'I am evaluating a 1-year-old African American Male from the South who drinks regularly and denies drug abuse. The child presents with frequent headaches. Symptoms have been present for several days or weeks and are affecting daily activities. Could this indicate migraine or tension headache and what diagnostic and management steps should I consider?'
+                },
+                {
+                    label: 'GI Disorder',
+                    q: 'I am evaluating a 12-year-old Hispanic Male from Texas who does not drink and denies drug abuse. The child presents with recurrent abdominal pain. Symptoms have been present for several days or weeks and are affecting daily activities. Could this indicate gastrointestinal disorder and what diagnostic and management steps should I consider?'
+                },
+                {
+                    label: 'Otitis Media',
+                    q: 'I am evaluating a 10-year-old Middle Eastern Female from the Mountain Ranges who drinks regularly and denies drug abuse. The child presents with recurrent ear pain. Symptoms have been present for several days or weeks and are affecting daily activities. Could this indicate otitis media and what diagnostic and management steps should I consider?'
+                },
+                {
+                    label: 'Anemia (Child)',
+                    q: 'I am evaluating a 7-year-old Asian Female from Texas who does not drink and denies drug abuse. The child presents with fatigue and pallor. Symptoms have been present for several days or weeks and are affecting daily activities. Could this indicate anemia and what diagnostic and management steps should I consider?'
+                }
+            ]
+        };
+
+        const DEPT_ICONS = {
+            'Cardiology': '❤️', 'Neurology': '🧠',
+            'Orthopedics': '🦴', 'Pediatrics': '👶'
+        };
+
+        function renderDeptQuickQuestions(activeDept) {
+            const container = document.getElementById('dept-quick-questions');
+            if (!container) return;
+            if (!activeDept || !DEPT_QUICK_QUESTIONS[activeDept]) {
+                container.innerHTML = '<div style="color:#aaa; font-size:0.85em; padding:6px 0;">Select a trained model above to see relevant sample questions.</div>';
+                return;
+            }
+            const icon = DEPT_ICONS[activeDept] || '🏥';
+            // Use index-based onclick — avoids embedding raw strings inside HTML attributes
+            const btns = DEPT_QUICK_QUESTIONS[activeDept].map((item, idx) =>
+                `<button class="dept-q-btn" onclick="setTestQuestion(DEPT_QUICK_QUESTIONS['${activeDept}'][${idx}].q)">${item.label}</button>`
+            ).join('');
+            container.innerHTML = `<div class="dept-quick-group active">
+                <div class="dept-label">${icon} ${activeDept} — sample questions from training data</div>
+                <div>${btns}</div>
+            </div>`;
         }
 
         async function testExperimentModel() {
@@ -3072,6 +3237,25 @@
                         ? `<span style="display: inline-block; padding: 2px 8px; background: #e3f2fd; color: #1565c0; border-radius: 4px; font-size: 0.8em; font-weight: 600;">🏥 ${escapeHtml(exp.department)}</span> ` 
                         : '';
 
+                    // Compute training duration from started_at → completed_at
+                    let durationDisplay = '—';
+                    if (exp.started_at && exp.completed_at) {
+                        const secs = Math.round((new Date(exp.completed_at) - new Date(exp.started_at)) / 1000);
+                        if (secs < 60) {
+                            durationDisplay = `${secs}s`;
+                        } else if (secs < 3600) {
+                            durationDisplay = `${Math.floor(secs / 60)}m ${secs % 60}s`;
+                        } else {
+                            const h = Math.floor(secs / 3600);
+                            const m = Math.floor((secs % 3600) / 60);
+                            durationDisplay = `${h}h ${m}m`;
+                        }
+                    } else if (exp.started_at && exp.status === 'running') {
+                        const secs = Math.round((Date.now() - new Date(exp.started_at).getTime()) / 1000);
+                        const m = Math.floor(secs / 60), s = secs % 60;
+                        durationDisplay = `${m}m ${s}s (running)`;
+                    }
+
                     html += `
                         <div class="exp-history-card">
                             <div style="flex: 1;">
@@ -3080,6 +3264,11 @@
                                 </div>
                                 <div style="font-size: 0.85em; color: #888;">
                                     ${exp.model_name} · r=${exp.lora_r} α=${exp.lora_alpha} · ${exp.num_epochs} epochs · ${exp.training_samples || '?'} samples · LR ${exp.learning_rate} · ${date}
+                                </div>
+                                <div style="font-size: 0.85em; color: #666; margin-top: 3px;">
+                                    ⏱️ Training time: <strong>${durationDisplay}</strong>
+                                    ${exp.started_at ? ` · Started: ${new Date(exp.started_at).toLocaleString()}` : ''}
+                                    ${exp.completed_at ? ` · Completed: ${new Date(exp.completed_at).toLocaleString()}` : ''}
                                 </div>
                             </div>
                             <div style="display: flex; align-items: center; gap: 10px;">

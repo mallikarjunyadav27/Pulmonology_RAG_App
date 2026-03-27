@@ -4574,6 +4574,7 @@ try:
         delete_doctor,
         get_doctors_by_departments,
         seed_sample_doctors,
+        update_experiment_samples,
     )
     sft_ensure_tables()
     # Auto-import JSONL into local SQLite if empty
@@ -4687,6 +4688,14 @@ def api_delete_experiment(exp_id):
     if not SFT_AVAILABLE:
         return jsonify({"success": False, "error": "SFT module not available"}), 503
     return jsonify(delete_experiment(exp_id))
+
+
+@app.route('/api/rlhf/experiment/<int:exp_id>/recalc-samples', methods=['POST'])
+def api_recalc_experiment_samples(exp_id):
+    """Recalculate and persist training_samples for an experiment using the live domain-aware count."""
+    if not SFT_AVAILABLE:
+        return jsonify({"success": False, "error": "SFT module not available"}), 503
+    return jsonify(update_experiment_samples(exp_id))
 
 
 @app.route('/api/rlhf/experiment/<int:exp_id>/test', methods=['POST'])
