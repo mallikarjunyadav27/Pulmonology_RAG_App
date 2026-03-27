@@ -5,3 +5,5 @@ KB/
 myenv/
 sft_models/
 .env.local
+.venv/
+__pycache__/*
